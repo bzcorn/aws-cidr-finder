@@ -12,7 +12,7 @@ import boto3
 import json
 from urllib2 import HTTPError, build_opener, HTTPHandler, Request
 
-from cidr_findr import find_next_subnet
+from cidr_findr import VpcRange, Cidrblock, Prefix
 from lambda_utils import parse_size, are_sizes_valid
 
 def send_response(event, context, response_status, reason=None, response_data={}):
@@ -59,8 +59,7 @@ def lambda_handler(event, context):
     # Collect parameters
     vpc_id = event["ResourceProperties"]["VpcId"]
     sizes = event["ResourceProperties"]["Sizes"]
-
-    sizes = map(parse_size, sizes)
+    # sizes = map(parse_size, sizes)
 
     # Check the sizes are valid
     if are_sizes_valid(sizes):
@@ -72,15 +71,19 @@ def lambda_handler(event, context):
     subnet_cidrs = [subnet["CidrBlock"] for subnet in ec2.describe_subnets(Filters=[{"Name": "vpc-id", "Values": [vpc_id]}])["Subnets"]]
 
     # These are the CIDRs you're looking for
-    result = find_next_subnet(vpc_cidr, subnet_cidrs, sizes)
-
-    print("VPC: {}, Subnets: {}, Request: {}, Result: {}".format(vpc_cidr, subnet_cidrs, sizes, result))
+    vpc = VpcRange(vpc_cidr, subnet_cidrs)
+    subnet_list = []
+    for prefix in sizes:
+        p = Prefix(prefix, vpc)
+        print("VPC: {}, Subnet: {}".format(vpc.vpc_cidr_block, p.first_available))
+        subnet_list.append(p.first_available)
 
     # Nothing found
-    if result is None:
+    if len(subnet_list) is 0:
         return send_response(event, context, "FAILED", reason="Not enough space for the requested CIDR blocks")
 
     # We have a winner
+    print subnet_list
     send_response(event, context, "SUCCESS", response_data={
-        "CidrBlocks": result,
+        "CidrBlocks": subnet_list,
     })

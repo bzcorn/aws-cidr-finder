@@ -7,21 +7,36 @@ http://aws.amazon.com/apache2.0/
 
 or in the "license" file accompanying this file. This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 """
+class Cidrblock(object):
+    def __init__(self, cidr_block):
+        """
+        Create a Cidrblock object given a CIDR Block
+        """
+        if cidr_block:
+            address, prefix = cidr_block.split("/")
+        self.cidr_block = cidr_block
+        self.address = address
+        self.prefix = prefix
+        self.hosts = self.get_prefix_as_decimal()
 
-class Range(object):
-    @staticmethod
-    def ip_to_num(ip):
+        self.broadcast = self.get_broadcast_address()
+        self.network = self.get_network_address()
+        self.next_block = self.get_next_cidr_block()
+
+    def ip_to_num(self, ip):
+        """
+        Given an IP address return it as a decimal number
+        """
         ip = ip.split(".")
-
         num = 0
-
         for i in range(4):
             num = num + int(ip[3 - i]) * (256 ** i)
-
         return num
 
-    @staticmethod
-    def num_to_ip(num):
+    def num_to_ip(self, num):
+        """
+        Given a decimal number convert into IP address notation
+        """
         ip = [0, 0, 0, 0]
 
         for i in range(4):
@@ -30,74 +45,167 @@ class Range(object):
 
         return ".".join(ip)
 
-    def overlaps(self, other):
-        if self.base >= other.base and self.base < other.top:
-            return True
+    def get_network_address(self):
+        """
+        Return the lowest decimal number of a CIDR block, 
+        also known as the network address
+        """
+        decimal_address = self.ip_to_num(self.address)
+        return decimal_address
 
-        if self.top > other.base and self.top < other.top:
-            return True
+    def get_broadcast_address(self):
+        """
+        Return the highest decimal number of a CIDR block,
+        also known as the broadcast address
+        """
+        decimal_address = self.ip_to_num(self.address)
+        return decimal_address + self.hosts - 1
 
-        return False
+    def get_prefix_as_decimal(self):
+        """
+        Return the decimal number of the amount of IP addresses in a prefix
+        Ex. /24 is 256, /16 is 65536
+        """
+        print self.prefix
+        print type(self.prefix)
+        n = 32 - int(self.prefix)
+        addresses = 2 ** n
+        return addresses
 
-    def __init__(self, base=None, top=None, size=None, cidr=None):
-        if cidr:
-            base, size = cidr.split("/")
+    def get_next_cidr_block(self):
+        """
+        Return the next CIDR block
+        """
+        next_block = self.num_to_ip(self.broadcast + 1)
+        str_next_block = "{}/{}".format(str(next_block), str(self.prefix))
+        return str_next_block
 
-        if isinstance(base, str):
-            self.base = self.ip_to_num(base)
-        else:
-            self.base = base
+class VpcRange(object):
+    def __init__(self, vpc_cidr_block, subnets):
+        """
+        Create a VPC object that has subnets
+        """
+        vpc = Cidrblock(vpc_cidr_block)
 
-        if size:
-            size = int(size)
+        self.vpc_cidr_block = vpc_cidr_block    # Ex: 192.168.0.0/16
+        self.address = vpc.address              # Ex: 192.168.0.0
+        self.prefix = vpc.prefix                # Ex: 16
+        self.hosts = vpc.hosts                  # Ex: 65536
+        self.highest = vpc.broadcast            # Ex: 192.168.255.255
+        self.lowest = vpc.network               # Ex: 192.168.0.0
 
-            self.top = self.base + 2 ** (32 - size)
-            self.size = size
-        elif top:
-            if isinstance(top, str):
-                self.top = self.ip_to_num(top)
-            else:
-                self.top = top
-
-            self.size = math.log(self.top - self.bottom, 2)
-        else:
-            raise Error("Not enough information to determine IP range")
-
-    def to_cidr(self):
-        return "{}/{}".format(self.num_to_ip(self.base), self.size)
-
-    def __str__(self):
-        return self.to_cidr()
-
-def find_next_subnet(vpc, subnets, reqs):
-    vpc = Range(cidr=vpc)
-
-    subnets.sort()
-
-    subnets = [
-        Range(cidr=subnet)
-        for subnet
-        in subnets
-    ]
-
-    results = []
-
-    for req in reqs:
-        attempt = Range(base=vpc.base, size=req)
+        self.subnet_list = []
 
         for subnet in subnets:
-            # Check for clashes with subnets
-            if not attempt.overlaps(subnet):
-                break
+            s = Cidrblock(subnet)
+            self.subnet_list.append(s)
 
-            # Start at the top of the subnet we clashed with
-            attempt = Range(base=subnet.top, size=req)
+    def add_subnet(self, new):
+        """
+        Add subnet to object's subnet list
+        """
+        new_subnet = Cidrblock(new)
+        self.subnet_list.append(new_subnet)
 
-        # Check we have space
-        if attempt.top > vpc.top:
-            return None
+    def compare_subnets(self, current, new):
+        """
+        Given a subnet compare with a VPC subnet and determine if they overlap
+        return True
+        """
+        if is_address_within_network(new.network, current):
+            return True
+        elif is_address_within_network(new.broadcast, current):
+            return True
+        else:
+            return False
 
-        results.append(attempt)
-        subnets.append(attempt)
+    def within_vpc(self, new):
+        """
+        Given a new subnet return True if its within the VPC Network Block
+        """
+        if (new.network > self.highest) and (new.network < self.lowest):
+            return False
+        elif (new.broadcast > self.highest) or (new.broadcast < self.lowest):
+            return False
+        return True
 
-    return [result.to_cidr() for result in results]
+    def vet_subnet(self, new):
+        """
+        Given a new subnet check to ensure that it's within the VPC and that it
+        doesn't overlap with another subnet
+        """
+        new_subnet = Cidrblock(new)
+        if not self.within_vpc(new_subnet):
+            return (False, "Not within VPC network")
+        overlap = False
+        for current_subnet in self.subnet_list:
+            if self.compare_subnets(current_subnet, new_subnet) and not overlap:
+                overlap = (True, new_subnet.next_block)
+        if overlap:
+            return (True, new_subnet.next_block)
+        else:
+            self.add_subnet(new)
+            return (False, new_subnet.cidr_block)
+
+    def get_subnet_list(self):
+        """
+        Return readable subnet list
+        """
+        subnet_list = []
+        for subnet in self.subnet_list:
+            subnet_list.append(subnet.cidr_block)
+        return subnet_list
+
+    def is_address_within_network(self, ip_address, current):
+        """
+        Given an IP address and network range determine if it lies within a network
+        """
+        network_address = current.network
+        broadcast_address = current.broadcast
+        if ((ip_address >= network_address) and (ip_address <= broadcast_address)):
+            return True
+        return False
+
+class Prefix(object):
+    """
+    Create a prefix block that will return the first available CIDR Block
+    in a VPC
+    """
+    def __init__(self, prefix, vpc):
+        """
+        Given a prefix (string) and vpc (VpcRange object) determine
+        next available cidr block in a VPC
+        """
+        print "Prefix class run.  Prefix is: {}".format(prefix)
+        self.vpc = vpc
+        self.prefix = prefix
+
+        first_ip = self.get_first_vpc_ip()
+        cidr_block = self.get_cidr_block(first_ip)
+
+        self.first_available = self.get_available_block(cidr_block)
+
+    def get_first_vpc_ip(self):
+        """
+        Return VPC network address as string
+        """
+        first_block = self.vpc.address
+        return first_block
+
+    def get_cidr_block(self, network):
+        """
+        Given a network return the cidr block
+        """
+        cidr_block = "{}/{}".format(network, self.prefix)
+        return cidr_block
+
+    def get_available_block(self, cidr_block):
+        """
+        Given a starting CIDR block loop through a VPC 
+        until a free block is found
+        """
+        while self.vpc.vet_subnet(cidr_block)[0]:
+            cidr_block = self.vpc.vet_subnet(cidr_block)[1]
+        return cidr_block
+
+
